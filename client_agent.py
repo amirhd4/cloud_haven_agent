@@ -12,8 +12,10 @@ import gzip
 import shutil
 import time
 import argparse
+import asyncio
+import websockets
+import json
 
-# ایمپورت‌های جدید
 from utils.security import generate_key, encrypt_file, decrypt_file
 from drivers.postgres_driver import PostgresDriver
 from drivers.mysql_driver import MySQLDriver
@@ -55,20 +57,6 @@ class ClientAgent:
         self._save_config()
         self.encryption_key = key
         print("✅ کلید رمزگذاری با موفقیت تولید و در 'client_config.ini' ذخیره شد.")
-
-    def register(self):
-        if self.access_token: return
-        print("🚀 در حال ثبت‌نام کلاینت...")
-        try:
-            payload = {"hostname": socket.gethostname(), "os_type": platform.system().lower()}
-            response = requests.post(f"{self.server_url}/api/v1/clients/register", json=payload, timeout=10)
-            response.raise_for_status()
-            self.access_token = response.json().get("access_token")
-            if self.access_token:
-                print("✅ ثبت‌نام موفق!")
-                self._save_config()
-        except Exception as e:
-            raise RuntimeError(f"ثبت‌نام اولیه ناموفق بود: {e}")
 
     def get_headers(self) -> dict:
         if not self.access_token: raise ValueError("Token not found.")
@@ -204,53 +192,74 @@ class ClientAgent:
         except Exception as e:
             raise RuntimeError(f"دانلود ناموفق بود: {e}")
 
+    async def _websocket_listener(self):
+        """یک اتصال WebSocket برقرار کرده و برای دریافت فرمان‌ها گوش می‌دهد."""
+        ws_uri = f"ws://{self.server_url.split('//')[1]}/api/v1/clients/ws"
+        headers = {"Authorization": f"Bearer {self.access_token}"}
+
+        async for websocket in websockets.connect(ws_uri, extra_headers=headers):
+            print("✅ با موفقیت به سرور WebSocket متصل شد. منتظر دریافت فرمان...")
+            try:
+                async for message in websocket:
+                    print(f"\n📨 فرمان جدید دریافت شد: {message}")
+                    command = json.loads(message)
+                    action = command.get("action")
+                    job_name = command.get("job")
+
+                    if not job_name or job_name not in JOBS:
+                        print("❌ فرمان نامعتبر: job تعریف نشده یا نامعتبر است.")
+                        continue
+
+                    job_config = JOBS[job_name]
+
+                    if action == "backup":
+                        self.run_backup_job(job_config)
+                    elif action == "restore":
+                        file_name = command.get("file")
+                        if not file_name:
+                            print("❌ فرمان نامعتبر: برای restore نام فایل الزامی است.")
+                            continue
+                        self.run_restore_job(job_config, file_name)
+
+            except websockets.ConnectionClosed:
+                print("⚠️ اتصال با سرور قطع شد. تلاش برای اتصال مجدد...")
+                await asyncio.sleep(5)
+
 
 if __name__ == "__main__":
     # --- تعریف کانفیگ‌های مختلف برای دیتابیس‌ها ---
-    # این بخش را با اطلاعات واقعی دیتابیس‌های خود پر کنید
     JOBS = {
         "pg_main": {
-            "type": "postgresql",
-            "bucket": "pg-main-backups",
+            "type": "postgresql", "bucket": "pg-main-backups",
             "config": {
                 "host": "localhost", "port": 5432, "dbname": "online_shop",
                 "user": "postgres", "password": "12345678"
             }
         },
         "mysql_web": {
-            "type": "mysql",
-            "bucket": "mysql-web-backups",
-            "config": {
-                "host": "localhost", "port": 3306, "database": "your_mysql_db",
-                "user": "your_mysql_user", "password": "your_mysql_password"
-            }
+            "type": "mysql", "bucket": "mysql-web-backups",
+            "config": {"host": "localhost", "port": 3306, "database": "your_mysql_db",
+                       "user": "your_mysql_user", "password": "your_mysql_password"
+                       }
         }
     }
 
-    # --- ساختار صحیح و جدید Argparse ---
-    parser = argparse.ArgumentParser(
-        description="کلاینت امن سیستم پشتیبان‌گیری",
-        formatter_class=argparse.RawTextHelpFormatter  # برای نمایش بهتر help
-    )
-    subparsers = parser.add_subparsers(dest='action', required=True, help="عملیات مورد نظر")
+    parser = argparse.ArgumentParser(description="کلاینت امن سیستم پشتیبان‌گیری")
+    subparsers = parser.add_subparsers(dest='action', required=True)
 
-    # کامند 1: generate-key (بدون نیاز به آرگومان اضافی)
-    parser_keygen = subparsers.add_parser('generate-key', help="یک کلید رمزگذاری جدید تولید و ذخیره می‌کند")
+    parser_keygen = subparsers.add_parser('generate-key', help="یک کلید رمزگذاری جدید تولید می‌کند.")
 
-    # کامند 2: backup
-    parser_backup = subparsers.add_parser('backup', help="از دیتابیس مشخص شده یک بکاپ جدید ایجاد می‌کند")
-    parser_backup.add_argument('--job', choices=JOBS.keys(), required=True, help="نام وظیفه‌ای که باید اجرا شود")
+    parser_listen = subparsers.add_parser('listen', help="به عنوان یک سرویس اجرا شده و منتظر دستورات از سرور می‌ماند.")
 
-    # کامند 3: list
-    parser_list = subparsers.add_parser('list', help="لیست بکاپ‌های موجود برای یک وظیفه را نمایش می‌دهد")
-    parser_list.add_argument('--job', choices=JOBS.keys(), required=True,
-                             help="نام وظیفه‌ای که لیست بکاپ‌های آن نمایش داده شود")
+    parser_backup = subparsers.add_parser('run-backup', help="یک وظیفه بکاپ را به صورت دستی اجرا می‌کند.")
+    parser_backup.add_argument('--job', choices=JOBS.keys(), required=True)
 
-    # کامند 4: restore
-    parser_restore = subparsers.add_parser('restore', help="یک بکاپ مشخص را بازیابی می‌کند")
-    parser_restore.add_argument('--job', choices=JOBS.keys(), required=True,
-                                help="نام وظیفه‌ای که بکاپ روی آن بازیابی می‌شود")
-    parser_restore.add_argument('--file', required=True, help="نام کامل فایل بکاپ برای بازیابی (با پسوند .enc)")
+    parser_list = subparsers.add_parser('run-list', help="لیست بکاپ‌ها را به صورت دستی دریافت می‌کند.")
+    parser_list.add_argument('--job', choices=JOBS.keys(), required=True)
+
+    parser_restore = subparsers.add_parser('run-restore', help="یک بکاپ را به صورت دستی بازیابی می‌کند.")
+    parser_restore.add_argument('--job', choices=JOBS.keys(), required=True)
+    parser_restore.add_argument('--file', required=True)
 
     args = parser.parse_args()
 
@@ -260,26 +269,26 @@ if __name__ == "__main__":
         if args.action == 'generate-key':
             key = generate_key()
             agent.save_encryption_key(key)
+            print("عملیات با موفقیت انجام شد.")
+
+        elif args.action == 'listen':
+            if not agent.access_token: raise ValueError("توکن دسترسی در client_config.ini یافت نشد.")
+            if not agent.encryption_key: raise ValueError("کلید رمزگذاری در client_config.ini یافت نشد.")
+            asyncio.run(agent._websocket_listener())
+
         else:
-            # تمام عملیات دیگر نیازمند انتخاب یک job و ثبت بودن کلاینت هستند
-            selected_job_config = JOBS[args.job]
+            if not agent.access_token: raise ValueError("توکن دسترسی در client_config.ini یافت نشد.")
+            if not agent.encryption_key and args.action != 'run-list':
+                raise ValueError("کلید رمزگذاری برای این عملیات الزامی است.")
 
-            if not agent.access_token:
-                agent.register()
+            job_config = JOBS[args.job]
 
-            if args.action == 'backup':
-                agent.run_backup_job(selected_job_config)
-
-            elif args.action == 'list':
-                backups = agent.list_backups(selected_job_config['bucket'])
-                if backups:
-                    print(f"\n--- لیست بکاپ‌های موجود در باکت '{selected_job_config['bucket']}' ---")
-                    for f in backups:
-                        print(f"  - {f}")
-                    print("-------------------------------------------------")
-
-            elif args.action == 'restore':
-                agent.run_restore_job(selected_job_config, args.file)
+            if args.action == 'run-backup':
+                agent.run_backup_job(job_config)
+            elif args.action == 'run-list':
+                agent.list_backups(job_config['bucket'])
+            elif args.action == 'run-restore':
+                agent.run_restore_job(job_config, args.file)
 
     except (ValueError, RuntimeError, FileNotFoundError) as e:
         print(f"\n🔴 یک خطای عملیاتی رخ داد: {e}")
