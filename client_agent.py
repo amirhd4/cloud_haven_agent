@@ -232,9 +232,15 @@ class ClientAgent:
             try:
                 async with websockets.connect(ws_uri, additional_headers=headers) as websocket:
                     print("✅ با موفقیت به سرور WebSocket متصل شد.")
-                    identify_payload = {"type": "identify", "jobs": list(self.jobs_config.keys())}
+
+                    # --- معرفی خود با جزئیات کامل (نام جاب -> نام باکت) ---
+                    jobs_map = {name: details['bucket'] for name, details in self.jobs_config.items()}
+                    identify_payload = {
+                        "type": "identify",
+                        "jobs": jobs_map
+                    }
                     await websocket.send(json.dumps(identify_payload))
-                    print(f"ℹ️ قابلیت‌ها به سرور معرفی شد: {identify_payload['jobs']}")
+                    print(f"ℹ️ قابلیت‌ها به سرور معرفی شد: {jobs_map}")
                     print("...منتظر دریافت فرمان...")
 
                     async for message in websocket:
