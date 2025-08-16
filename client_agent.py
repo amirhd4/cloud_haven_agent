@@ -230,7 +230,7 @@ class ClientAgent:
 
         while True:
             try:
-                async with websockets.connect(ws_uri, additional_headers=headers) as websocket:
+                async with websockets.connect(ws_uri, additional_headers=headers, proxy=None) as websocket:
                     print("✅ با موفقیت به سرور WebSocket متصل شد.")
 
                     # --- معرفی خود با جزئیات کامل (نام جاب -> نام باکت) ---
