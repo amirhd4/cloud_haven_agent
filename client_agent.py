@@ -57,6 +57,10 @@ class ClientAgent:
         self.temp_dir = Path("./temp_backups")
         self.temp_dir.mkdir(exist_ok=True)
         self._load_config()
+        self.no_proxy = {
+            "http": None,
+            "https": None,
+        }
 
     def _load_config(self):
         if self.config_path.exists():
@@ -103,7 +107,7 @@ class ClientAgent:
                 data = f.read()
             headers = self.get_headers()
             headers['Content-Type'] = 'application/octet-stream'
-            response = requests.put(upload_url, data=data, headers=headers, timeout=300)
+            response = requests.put(upload_url, data=data, headers=headers, timeout=300, proxies=self.no_proxy)
             response.raise_for_status()
             print(f"🎉 [{datetime.now()}] آپلود موفق!")
             return True
@@ -114,7 +118,7 @@ class ClientAgent:
         print(f"📥 [{datetime.now()}] در حال دانلود فایل '{object_name}'...")
         download_url = f"{self.server_url}/api/v1/storage/download/{bucket_name}/{object_name}"
         try:
-            response = requests.get(download_url, headers=self.get_headers(), timeout=300, stream=True)
+            response = requests.get(download_url, headers=self.get_headers(), timeout=300, stream=True, proxies=self.no_proxy)
             response.raise_for_status()
             with open(destination_path, 'wb') as f:
                 shutil.copyfileobj(response.raw, f)
@@ -127,7 +131,7 @@ class ClientAgent:
         print(f"🔍 در حال دریافت لیست بکاپ‌ها از باکت '{bucket_name}'...")
         list_url = f"{self.server_url}/api/v1/storage/list/{bucket_name}"
         try:
-            response = requests.get(list_url, headers=self.get_headers(), timeout=60)
+            response = requests.get(list_url, headers=self.get_headers(), timeout=60, proxies=self.no_proxy)
             response.raise_for_status()
             files = response.json().get("files", [])
             print(f"✅ {len(files)} فایل بکاپ یافت شد.")
@@ -191,7 +195,7 @@ class ClientAgent:
         """زمان‌بندی‌ها را از API اختصاصی Agent دریافت و در زمان‌بند محلی اعمال می‌کند."""
         print(f"[{datetime.now()}] در حال دریافت و به‌روزرسانی زمان‌بندی‌ها از سرور...")
         try:
-            response = requests.get(f"{self.server_url}/api/v1/agent/my-schedules", headers=self.get_headers())
+            response = requests.get(f"{self.server_url}/api/v1/agent/my-schedules", headers=self.get_headers(), proxies=self.no_proxy)
             response.raise_for_status()
             schedules = response.json()
 
